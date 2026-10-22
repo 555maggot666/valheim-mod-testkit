@@ -1,0 +1,316 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Reflection;
+using System.Text;
+using BepInEx;
+
+namespace ValheimTestKit
+{
+    /// <summary>
+    /// Runs every <see cref="TestSuite"/> found in the loaded assemblies inside the live game and writes the
+    /// result to <c>BepInEx/config/valheim-testkit/report.json</c>.
+    ///
+    /// Works on a dedicated server (server-side scenarios) and on a client (client-side scenarios, popups,
+    /// hud). Suites declare which side they need via <see cref="TestSuite.RequiresServer"/> /
+    /// <see cref="TestSuite.RequiresClient"/>; the others are reported as skipped instead of failing.
+    /// </summary>
+    [BepInPlugin(PluginGuid, "ValheimTestKit", "0.1.0")]
+    public sealed class TestKitPlugin : BaseUnityPlugin
+    {
+        public const string PluginGuid = "555maggot666.ValheimTestKit";
+
+        private const float WorldReadyTimeoutSeconds = 300f;
+
+        private readonly List<SuiteResult> _results = new List<SuiteResult>();
+        private bool _started;
+
+        private void Update()
+        {
+            if (_started || !IsWorldReady())
+            {
+                return;
+            }
+
+            _started = true;
+            StartCoroutine(RunAll());
+        }
+
+        private static bool IsWorldReady()
+        {
+            ZNet znet = ZNet.instance;
+            if (znet == null || znet.GetWorldUID() == 0L)
+            {
+                return false;
+            }
+
+            return znet.IsDedicated() || Player.m_localPlayer != null;
+        }
+
+        private IEnumerator RunAll()
+        {
+            Logger.LogInfo("testkit: world ready (dedicated=" + ZNet.instance.IsDedicated() + "), collecting suites");
+            yield return null;
+
+            List<TestSuite> suites = DiscoverSuites();
+            Logger.LogInfo("testkit: " + suites.Count + " suite(s) found: " +
+                           string.Join(", ", suites.ConvertAll(s => s.Name).ToArray()));
+
+            if (suites.Count == 0)
+            {
+                Logger.LogWarning("testkit: no [TestKitSuite] class loaded; put a suite DLL next to this plugin");
+            }
+
+            bool dedicated = ZNet.instance.IsDedicated();
+            for (int i = 0; i < suites.Count; i++)
+            {
+                TestSuite suite = suites[i];
+                if ((suite.RequiresServer && !dedicated) || (suite.RequiresClient && dedicated))
+                {
+                    var skipped = new SuiteResult(suite.Name, skippedReason: dedicated ? "server-only suite on a client"
+                                                                                      : "client-only suite on the server");
+                    _results.Add(skipped);
+                    Logger.LogWarning("testkit: skipping suite " + suite.Name + " (" + skipped.SkipReason + ")");
+                    continue;
+                }
+
+                Logger.LogInfo("testkit: running suite " + suite.Name);
+                yield return null;
+                IEnumerator run = null;
+                try
+                {
+                    run = suite.Run();
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError("testkit: suite " + suite.Name + " threw before it started: " + ex);
+                }
+
+                while (run != null)
+                {
+                    bool moved;
+                    try
+                    {
+                        moved = run.MoveNext();
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("testkit: suite " + suite.Name + " aborted: " + ex);
+                        break;
+                    }
+
+                    if (!moved)
+                    {
+                        break;
+                    }
+
+                    yield return run.Current;
+                }
+
+                _results.Add(new SuiteResult(suite));
+                yield return null;
+            }
+
+            WriteReport();
+        }
+
+        private List<TestSuite> DiscoverSuites()
+        {
+            var found = new List<TestSuite>();
+            Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            for (int a = 0; a < assemblies.Length; a++)
+            {
+                Type[] types;
+                try
+                {
+                    types = assemblies[a].GetTypes();
+                }
+                catch (ReflectionTypeLoadException ex)
+                {
+                    types = ex.Types;
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+
+                if (types == null)
+                {
+                    continue;
+                }
+
+                for (int t = 0; t < types.Length; t++)
+                {
+                    Type type = types[t];
+                    if (type == null || type.IsAbstract || !typeof(TestSuite).IsAssignableFrom(type))
+                    {
+                        continue;
+                    }
+
+                    if (type.GetCustomAttribute<TestKitSuiteAttribute>() == null)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        found.Add((TestSuite)Activator.CreateInstance(type));
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("testkit: could not create suite " + type.FullName + ": " + ex.Message);
+                    }
+                }
+            }
+
+            found.Sort((x, y) => string.CompareOrdinal(x.Name, y.Name));
+            return found;
+        }
+
+        private void WriteReport()
+        {
+            int passed = 0;
+            int failed = 0;
+            int skipped = 0;
+            var json = new StringBuilder();
+            json.Append("{\n");
+            json.Append("  \"generatedAt\": \"").Append(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)).Append("\",\n");
+            json.Append("  \"world\": \"").Append(Escape(ZNet.instance.GetWorldName())).Append("\",\n");
+            json.Append("  \"dedicated\": ").Append(ZNet.instance.IsDedicated() ? "true" : "false").Append(",\n");
+
+            var suitesJson = new StringBuilder("[");
+            for (int i = 0; i < _results.Count; i++)
+            {
+                SuiteResult result = _results[i];
+                passed += result.PassedCount;
+                failed += result.FailedCount;
+                skipped += result.SkippedCount + (result.SkipReason != null ? 1 : 0);
+                if (i > 0)
+                {
+                    suitesJson.Append(", ");
+                }
+
+                suitesJson.Append(result.ToJson());
+            }
+
+            suitesJson.Append(']');
+            json.Append("  \"passed\": ").Append(passed).Append(",\n");
+            json.Append("  \"failed\": ").Append(failed).Append(",\n");
+            json.Append("  \"skipped\": ").Append(skipped).Append(",\n");
+            json.Append("  \"suites\": ").Append(suitesJson).Append("\n}\n");
+
+            string dir = Path.Combine(Paths.ConfigPath, "valheim-testkit");
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, "report.json");
+            File.WriteAllText(path, json.ToString());
+
+            Logger.LogInfo("testkit: " + passed + " passed, " + failed + " failed, " + skipped + " skipped -> " + path);
+            if (failed == 0)
+            {
+                Logger.LogInfo("TESTKIT OK");
+            }
+            else
+            {
+                Logger.LogError("TESTKIT FAILED");
+            }
+        }
+
+        internal static string Escape(string value)
+        {
+            if (value == null)
+            {
+                return string.Empty;
+            }
+
+            var sb = new StringBuilder(value.Length + 8);
+            foreach (char c in value)
+            {
+                switch (c)
+                {
+                    case '"': sb.Append("\\\""); break;
+                    case '\\': sb.Append("\\\\"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default: sb.Append(c); break;
+                }
+            }
+
+            return sb.ToString();
+        }
+    }
+
+    internal sealed class SuiteResult
+    {
+        private readonly string _name;
+        private readonly List<string> _passed;
+        private readonly List<string> _failed;
+        private readonly List<string> _skipped;
+        private readonly List<string> _details;
+
+        public SuiteResult(TestSuite suite)
+        {
+            _name = suite.Name;
+            _passed = new List<string>(suite.Passed);
+            _failed = new List<string>(suite.Failed);
+            _skipped = new List<string>(suite.Skipped);
+            _details = new List<string>(suite.Details);
+        }
+
+        public SuiteResult(string name, string skippedReason)
+        {
+            _name = name;
+            _passed = new List<string>();
+            _failed = new List<string>();
+            _skipped = new List<string>();
+            _details = new List<string>();
+            SkipReason = skippedReason;
+        }
+
+        public string Name => _name;
+
+        public string SkipReason { get; }
+
+        public int PassedCount => _passed.Count;
+
+        public int FailedCount => _failed.Count;
+
+        public int SkippedCount => _skipped.Count;
+
+        public string ToJson()
+        {
+            var sb = new StringBuilder();
+            sb.Append("{\"name\": \"").Append(TestKitPlugin.Escape(_name)).Append("\", ");
+            sb.Append("\"passed\": ").Append(PassedCount).Append(", ");
+            sb.Append("\"failed\": ").Append(FailedCount).Append(", ");
+            sb.Append("\"skipped\": ").Append(SkippedCount).Append(", ");
+            if (SkipReason != null)
+            {
+                sb.Append("\"skipReason\": \"").Append(TestKitPlugin.Escape(SkipReason)).Append("\", ");
+            }
+
+            sb.Append("\"failedNames\": ").Append(Array(_failed)).Append(", ");
+            sb.Append("\"passedNames\": ").Append(Array(_passed)).Append(", ");
+            sb.Append("\"details\": ").Append(Array(_details)).Append('}');
+            return sb.ToString();
+        }
+
+        private static string Array(List<string> values)
+        {
+            var sb = new StringBuilder("[");
+            for (int i = 0; i < values.Count; i++)
+            {
+                if (i > 0)
+                {
+                    sb.Append(", ");
+                }
+
+                sb.Append('"').Append(TestKitPlugin.Escape(values[i])).Append('"');
+            }
+
+            return sb.Append(']').ToString();
+        }
+    }
+}

@@ -1,0 +1,72 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ValheimTestKit: test-only BepInEx plugin that runs test suites inside a live Valheim process
+    (dedicated server or headless client). It ships no gameplay code and is never published as a mod.
+
+    Build:
+      VH_MANAGED_DIR=/path/to/valheim_server_Data/Managed \
+      BEPINEX_CORE_DIR=/path/to/BepInEx/core \
+      dotnet build src/ValheimTestKit -c Release
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>ValheimTestKit</AssemblyName>
+    <RootNamespace>ValheimTestKit</RootNamespace>
+    <Version>0.1.0</Version>
+    <Deterministic>true</Deterministic>
+    <DebugType>none</DebugType>
+    <NoWarn>$(NoWarn);MSB3277;CS1701;CS1702;NU1701;CS0618</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <VtkManagedDir>$(VH_MANAGED_DIR)</VtkManagedDir>
+    <VtkCoreDir>$(BEPINEX_CORE_DIR)</VtkCoreDir>
+  </PropertyGroup>
+
+  <Target Name="VtkCheckReferencePaths" BeforeTargets="BeforeResolveReferences;ResolveAssemblyReferences;CoreCompile">
+    <Error Condition="'$(VtkManagedDir)' == ''"
+           Text="VH_MANAGED_DIR is not set. Point it at the Valheim 'Managed' directory." />
+    <Error Condition="'$(VtkCoreDir)' == ''"
+           Text="BEPINEX_CORE_DIR is not set. Point it at the BepInEx 'core' directory." />
+    <Error Condition="'$(VtkManagedDir)' != '' And !Exists('$(VtkManagedDir)/assembly_valheim.dll')"
+           Text="VH_MANAGED_DIR='$(VtkManagedDir)' does not contain assembly_valheim.dll." />
+    <Error Condition="'$(VtkCoreDir)' != '' And !Exists('$(VtkCoreDir)/BepInEx.dll')"
+           Text="BEPINEX_CORE_DIR='$(VtkCoreDir)' does not contain BepInEx.dll." />
+  </Target>
+
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>$(VtkCoreDir)/BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(VtkCoreDir)/0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="assembly_valheim">
+      <HintPath>$(VtkManagedDir)/assembly_valheim.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="assembly_utils">
+      <HintPath>$(VtkManagedDir)/assembly_utils.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(VtkManagedDir)/UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(VtkManagedDir)/UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>$(VtkManagedDir)/UnityEngine.ImageConversionModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
