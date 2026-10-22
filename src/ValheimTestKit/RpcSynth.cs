@@ -10,12 +10,13 @@ namespace ValheimTestKit
     /// Synthetic peer: delivers a routed RPC into the game's own handler without a second Steam account.
     ///
     /// <para><see cref="Send"/> uses the real send path (<c>ZRoutedRpc.InvokeRoutedRPC</c>).</para>
-    /// <para><see cref="Deliver"/> mirrors the real receive path: it looks the method up in the game's registry
-    /// and calls <c>RoutedMethodBase.Invoke(long, ZPackage)</c>, the same entry point
+    /// <para><see cref="Deliver"/> mirrors the real receive path: it looks the method up in the game's registry,
+    /// builds the parameter package with <c>ZRpc.Serialize</c> exactly like <c>InvokeRoutedRPC</c> does, and
+    /// passes it directly to <c>RoutedMethodBase.Invoke(long, ZPackage)</c>, the same entry point
     /// <c>ZRoutedRpc.HandleRoutedRPC</c> uses. Typed registrations (<c>RoutedMethod&lt;bool&gt;</c>,
-    /// <c>RoutedMethod&lt;Vector3&gt;</c>, …) deserialize their argument inside that method, so calling it is
-    /// what a real peer's packet does. Calling a stored delegate directly would only work for
-    /// <c>RoutedMethod&lt;ZPackage&gt;</c>.</para>
+    /// <c>RoutedMethod&lt;Vector3&gt;</c>, …) deserialize their arguments inside that method, so calling it is
+    /// what a real peer's packet does. This holds for <c>Register&lt;ZPackage&gt;</c> handlers too: the
+    /// <see cref="ZPackage"/> value is nested into the parameter package, as on the network.</para>
     /// </summary>
     public static class RpcSynth
     {
@@ -37,12 +38,14 @@ namespace ValheimTestKit
         }
 
         /// <summary>
-        /// Delivers <paramref name="payload"/> to the handler registered as <paramref name="rpcName"/>, as if it
-        /// had arrived from <paramref name="sender"/>. The payload may sit anywhere inside its package: it is
-        /// wrapped the way the network layer wraps it, so the handler always sees a fresh package at position 0.
+        /// Delivers <paramref name="values"/> to the handler registered as <paramref name="rpcName"/>, as if they
+        /// had arrived from <paramref name="sender"/>. The parameter package is built with <c>ZRpc.Serialize</c>
+        /// (exactly what <c>ZRoutedRpc.InvokeRoutedRPC</c> sends: typed values raw, a <see cref="ZPackage"/>
+        /// nested) and handed directly to <c>RoutedMethodBase.Invoke</c>, so typed handlers and
+        /// <c>Register&lt;ZPackage&gt;</c> handlers see what a real peer's packet would give them.
         /// Returns false when no handler is registered under that name.
         /// </summary>
-        public static bool Deliver(string rpcName, ZPackage payload, long sender)
+        public static bool Deliver(string rpcName, long sender, params object[] values)
         {
             ZRoutedRpc rpc = ZRoutedRpc.instance;
             if (rpc == null)
@@ -50,9 +53,9 @@ namespace ValheimTestKit
                 throw new InvalidOperationException("ZRoutedRpc.instance is null (not connected)");
             }
 
-            if (payload == null)
+            if (values == null)
             {
-                throw new ArgumentNullException(nameof(payload));
+                throw new ArgumentNullException(nameof(values));
             }
 
             object routedMethod = FindMethod(rpc, rpcName);
@@ -61,11 +64,11 @@ namespace ValheimTestKit
                 return false;
             }
 
-            // What HandleRoutedRPC ends up with: a package holding exactly one nested package, at position 0.
-            // RoutedMethodBase.Invoke reads that nested package and deserializes the typed argument from it.
-            var wire = new ZPackage();
-            wire.Write(payload);
-            wire.SetPos(0);
+            // What the network hands to RoutedMethodBase.Invoke: data.m_parameters itself, built exactly like
+            // ZRoutedRpc.InvokeRoutedRPC builds it (ZRpc.Serialize: typed values raw, a ZPackage nested).
+            var parameters = new ZPackage();
+            ZRpc.Serialize(values, ref parameters);
+            parameters.SetPos(0);
 
             MethodInfo invoke = FindInvoke(routedMethod.GetType());
             if (invoke == null)
@@ -77,7 +80,7 @@ namespace ValheimTestKit
 
             try
             {
-                invoke.Invoke(routedMethod, new object[] { sender, wire });
+                invoke.Invoke(routedMethod, new object[] { sender, parameters });
             }
             catch (TargetInvocationException ex) when (ex.InnerException != null)
             {
@@ -182,9 +185,9 @@ namespace ValheimTestKit
                 return;
             }
 
-            _resolved = true;
             _functions = typeof(ZRoutedRpc).GetField("m_functions", BindingFlags.Instance | BindingFlags.NonPublic);
             _stableHash = FindStableHash();
+            _resolved = true;
         }
 
         /// <summary>GetStableHashCode is an extension method on StringExtensionMethods in assembly_utils.</summary>

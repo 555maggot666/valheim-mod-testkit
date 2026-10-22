@@ -62,6 +62,21 @@ Check the GPU with `vulkaninfo --summary` (expect `llvmpipe`). Put the same plug
 `Screen.Capture("name")` to save a PNG of the render output, which works under Xvfb because it renders the
 camera into a texture instead of photographing a window.
 
+### Running the client suite
+
+`scripts/run-client-suite.sh` does the deploy/start/wait cycle for a client, like `run-suite.sh` does for a
+server. It starts Xvfb itself when the display is not up yet.
+
+```bash
+./scripts/run-client-suite.sh --client-dir ~/valheim-client \
+                              --plugin-dir ./out/plugins \
+                              --connect 127.0.0.1:2464 \
+                              [--password <pw>] [--timeout 600]
+```
+
+`--connect` is passed to the game as `+connect <ip:port>`; `--password` as `-password <pw>`. A Steam client
+logged in as the owning account is still required (see above).
+
 ### Two clients on one machine?
 
 Not worth it: one Steam account cannot be logged in twice, and each client wants 4–6 GB RAM. When a scenario

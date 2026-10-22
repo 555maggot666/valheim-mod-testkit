@@ -3,7 +3,12 @@
 #
 #   ./scripts/run-client-suite.sh --client-dir ~/valheim-client \
 #                                 --plugin-dir ./out/plugins \
-#                                 --connect 127.0.0.1:2464 --timeout 600
+#                                 --connect 127.0.0.1:2464 [--password <pw>] --timeout 600
+#
+# Auto-join: a) `+connect <ip:port>` is the evidenced auto-join path (FejdStartup.HandleStartupJoin reads it).
+# b) A password join without a character (`-joinserverwithcharacter <host> <char>`) would be the only fully
+# automatic path, but it is UNVERIFIED here as long as no Steam client is running. `--password` is passed as
+# `-password <pw>`.
 #
 # Requires: a Steam client logged in as the account that owns the game (Valheim's ZNet talks Steam
 # networking — without Steamworks the client boots but can never join or host a world), Xvfb and Mesa's
@@ -20,6 +25,7 @@ DISPLAY_NUM=":99"
 WIDTH="1280"
 HEIGHT="720"
 TIMEOUT="600"
+PASSWORD=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -29,6 +35,7 @@ while [[ $# -gt 0 ]]; do
     --display) DISPLAY_NUM="$2"; shift 2 ;;
     --width) WIDTH="$2"; shift 2 ;;
     --height) HEIGHT="$2"; shift 2 ;;
+    --password) PASSWORD="$2"; shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -87,8 +94,11 @@ export DOORSTOP_TARGET_ASSEMBLY=./BepInEx/core/BepInEx.Preloader.dll
 
 ARGS=(-screen-width "$WIDTH" -screen-height "$HEIGHT" -screen-fullscreen 0 -console)
 if [[ -n "$CONNECT" ]]; then
-  # Valheim accepts a console command as a positional argument.
-  ARGS+=("connect $CONNECT")
+  # FejdStartup.HandleStartupJoin reads "+connect <addr>" as two separate argv elements.
+  ARGS+=("+connect" "$CONNECT")
+fi
+if [[ -n "$PASSWORD" ]]; then
+  ARGS+=("-password" "$PASSWORD")
 fi
 
 ./valheim.x86_64 "${ARGS[@]}" > "$LOG" 2>&1 &

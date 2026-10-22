@@ -85,10 +85,19 @@ DEADLINE=$(( $(date +%s) + TIMEOUT ))
 STARTED=$(date +%s)
 REPORT_OK=""
 while [[ $(date +%s) -lt $DEADLINE ]]; do
-  # Fail fast when the game is up but the kit never ran: no testkit plugin deployed, or a crash in a suite host.
-  if (( $(date +%s) - STARTED > 90 )) && grep -q "Game server connected" "$LOG" 2>/dev/null \
-     && ! grep -q "testkit: world ready" "$LOG" 2>/dev/null; then
-    echo "the server is running but the testkit plugin never started — is ValheimTestKit.dll deployed?" >&2
+  # A second copy of the same plugin guid makes BepInEx skip one DLL — the suite then silently never runs.
+  # Checked before the fail-fast below so a skipped duplicate is not misreported as "never loaded".
+  if grep -q "because a duplicate of it was already loaded" "$LOG" 2>/dev/null; then
+    echo "two copies of the same plugin are deployed; BepInEx skipped one:" >&2
+    grep -B2 "duplicate of it was already loaded" "$LOG" >&2
+    exit 1
+  fi
+
+  # Fail fast when the kit was never loaded by the chainloader. Loading the world may take minutes, so there is
+  # no separate window for it: once the kit is loaded, the run lasts until --timeout.
+  if (( $(date +%s) - STARTED > 90 )) && grep -q "Chainloader startup complete" "$LOG" 2>/dev/null \
+     && ! grep -q "Loading \[ValheimTestKit" "$LOG" 2>/dev/null; then
+    echo "the testkit plugin never loaded — is ValheimTestKit.dll in the deployed plugin dir?" >&2
     grep -a "ValheimTestKit\|Chainloader" "$LOG" | tail -10 >&2
     exit 1
   fi
@@ -107,13 +116,6 @@ while [[ $(date +%s) -lt $DEADLINE ]]; do
   fi
   sleep 2
 done
-
-# A second copy of the same plugin guid makes BepInEx skip one DLL — the suite then silently never runs.
-if grep -q "because a duplicate of it was already loaded" "$LOG"; then
-  echo "two copies of the same plugin are deployed; BepInEx skipped one:" >&2
-  grep -B2 "duplicate of it was already loaded" "$LOG" >&2
-  exit 1
-fi
 
 if [[ -z "$REPORT_OK" ]]; then
   echo "no usable report after ${TIMEOUT}s; last lines of $LOG:" >&2

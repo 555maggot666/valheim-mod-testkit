@@ -27,16 +27,16 @@ namespace MyMod.Tests
 
             yield return Scenario("synth-peer-delivery", () =>
             {
-                // A bool payload proves the typed path: Deliver goes through RoutedMethodBase.Invoke,
-                // which deserializes the argument exactly like a real peer's packet.
-                bool seen = false;
+                // Deliver builds the parameter package with ZRpc.Serialize (exactly what InvokeRoutedRPC sends) and
+                // hands it to RoutedMethodBase.Invoke, so the typed handler deserializes the argument itself.
+                int calls = 0;
+                bool seen = true;
                 ZRoutedRpc.instance.Register<bool>("MYMOD_SelfTest",
-                    (long sender, bool value) => { seen = value; });
+                    (long sender, bool value) => { calls++; seen = value; });
 
-                var payload = new ZPackage();
-                payload.Write(true);
-                Assert(RpcSynth.Deliver("MYMOD_SelfTest", payload, sender: 987654321L), "handler missing");
-                Assert(seen, "the typed argument did not arrive");
+                Assert(RpcSynth.Deliver("MYMOD_SelfTest", 987654321L, false), "handler missing");
+                AssertEqual(1, calls, "handler call count");
+                Assert(!seen, "the typed argument did not arrive");
             });
         }
     }

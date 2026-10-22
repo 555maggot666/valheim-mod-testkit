@@ -27,6 +27,7 @@ namespace ValheimTestKit
 
         private readonly List<SuiteResult> _results = new List<SuiteResult>();
         private bool _started;
+        private bool _finished;
         private bool _timedOut;
         private float _awakeAt;
 
@@ -37,7 +38,7 @@ namespace ValheimTestKit
 
         private void Update()
         {
-            if (_started)
+            if (_started || _finished)
             {
                 return;
             }
@@ -55,6 +56,7 @@ namespace ValheimTestKit
                 Logger.LogError("testkit: no world became ready within " + WorldReadyTimeoutSeconds +
                                 "s; writing a failing report instead of hanging");
                 _results.Add(SuiteResult.Aborted("world-ready", "no world became ready within " + WorldReadyTimeoutSeconds + "s"));
+                _finished = true;
                 WriteReport();
             }
         }
@@ -136,7 +138,7 @@ namespace ValheimTestKit
                 {
                     // An aborted suite is a failure, never a silent green.
                     Logger.LogError("testkit: suite " + suite.Name + " aborted: " + abortReason);
-                    _results.Add(SuiteResult.Aborted(suite.Name, abortReason));
+                    _results.Add(new SuiteResult(suite, abortReason));
                 }
                 else
                 {
@@ -145,6 +147,7 @@ namespace ValheimTestKit
                 yield return null;
             }
 
+            _finished = true;
             WriteReport();
         }
 
@@ -215,14 +218,17 @@ namespace ValheimTestKit
 
         private void WriteReport()
         {
+            ZNet znet = ZNet.instance;
+            string world = znet != null ? znet.GetWorldName() : null;
+            bool dedicated = znet != null && znet.IsDedicated();
             int passed = 0;
             int failed = 0;
             int skipped = 0;
             var json = new StringBuilder();
             json.Append("{\n");
             json.Append("  \"generatedAt\": \"").Append(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)).Append("\",\n");
-            json.Append("  \"world\": \"").Append(Escape(ZNet.instance.GetWorldName())).Append("\",\n");
-            json.Append("  \"dedicated\": ").Append(ZNet.instance.IsDedicated() ? "true" : "false").Append(",\n");
+            json.Append("  \"world\": \"").Append(Escape(world)).Append("\",\n");
+            json.Append("  \"dedicated\": ").Append(dedicated ? "true" : "false").Append(",\n");
 
             var suitesJson = new StringBuilder("[");
             for (int i = 0; i < _results.Count; i++)
@@ -309,6 +315,17 @@ namespace ValheimTestKit
             _failed = new List<string>(suite.Failed);
             _skipped = new List<string>(suite.Skipped);
             _details = new List<string>(suite.Details);
+        }
+
+        /// <summary>A suite that aborted part-way: keeps its partial results and marks the abort as a failure.</summary>
+        public SuiteResult(TestSuite suite, string abortReason)
+        {
+            _name = suite.Name;
+            _passed = new List<string>(suite.Passed);
+            _failed = new List<string>(suite.Failed);
+            _skipped = new List<string>(suite.Skipped);
+            _details = new List<string>(suite.Details);
+            _failed.Add("suite-aborted: " + abortReason);
         }
 
         public SuiteResult(string name, string skippedReason)

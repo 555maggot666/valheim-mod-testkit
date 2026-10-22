@@ -34,6 +34,8 @@ that is not visual.
 ```
 src/ValheimTestKit/        the plugin: suite discovery, report, RpcSynth, Reflect, Screen
 scripts/run-suite.sh       deploy plugins into a server dir, start it, wait for the report
+scripts/run-client-suite.sh  client run: start a game client (Xvfb), auto-join via --connect <ip:port>
+                           (optional --password), wait for the report
 examples/                  a minimal suite you can copy
 docs/setup.md              getting a headless server and a headless client
 ```
@@ -74,7 +76,7 @@ public sealed class MySuite : TestSuite
         yield return Scenario("remote-unlock", () =>
         {
             ZPackage pkg = BuildPayload();
-            Assert(RpcSynth.Deliver("MYMOD_New", RpcSynth.Rewind(pkg), sender: 987654321L), "no handler");
+            Assert(RpcSynth.Deliver("MYMOD_New", 987654321L, pkg), "no handler");
         });
     }
 }
@@ -87,6 +89,8 @@ enough — see `examples/SuiteLoader.cs`.
 
 - Suites assert on **game state**, not on log text.
 - `RpcSynth.Deliver` bypasses the network, not the handler: sender ids are yours to choose, so "another player"
-  is one integer.
+  is one integer. The parameters are serialized the way the network does it (`ZRpc.Serialize`, as in
+  `InvokeRoutedRPC`) and handed straight to `RoutedMethodBase.Invoke`, so typed handlers (`Register<bool>`,
+  `Register<int>`, …) and `Register<ZPackage>` handlers receive exactly what a real peer would send.
 - Anything that needs a human eye belongs in a manual checklist, not in a passing test.
 - The kit is test-only: it is never shipped in a mod package.
