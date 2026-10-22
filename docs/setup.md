@@ -27,9 +27,11 @@ Then `scripts/run-suite.sh` handles the rest: it copies your plugin directory in
 
 ## Client (needs one game license — yours)
 
-> **Unverified as of this commit.** The server path is proven end to end; the client run below has not been
-> executed yet because it needs an interactive Steam login. Expect to fix details (launch flags, lavapipe ICD) on
-> the first real run.
+> **Partially verified.** A client install (app 892970, ~3.7 GB) boots on this machine under Xvfb + llvmpipe and
+> BepInEx loads the mod, the kit and the suite (`3 loaded, 0 skipped, 0 failed`). What is *not* proven here: joining
+> a world. The client log shows `InvalidOperationException: Steamworks is not initialized` six times because no
+> Steam client is running, and Valheim's `ZNet` is Steam networking — a client without Steam can boot but never
+> join or host. Run the client suite with Steam logged in (your desktop is the realistic place).
 
 Only needed for client-side behaviour (popups, hud, "does the plugin load in the client build"). Use a
 real Steam login; do **not** copy a game between accounts.
@@ -49,7 +51,8 @@ sufficient, because suites assert on state, not on frames.
 sudo apt install xvfb mesa-vulkan-drivers
 Xvfb :99 -screen 0 1280x720x24 &
 export DISPLAY=:99
-export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+# llvmpipe is the only ICD here; the loader picks it up on its own. Confirm with:
+#   vulkaninfo --summary | grep deviceName    -> llvmpipe (LLVM ..., 256 bits)
 cd ~/valheim-client
 ./start_game_bepinex.sh -screen-width 1280 -screen-height 720 -screen-fullscreen 0
 ```

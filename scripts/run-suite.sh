@@ -82,8 +82,17 @@ PY
 }
 
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
+STARTED=$(date +%s)
 REPORT_OK=""
 while [[ $(date +%s) -lt $DEADLINE ]]; do
+  # Fail fast when the game is up but the kit never ran: no testkit plugin deployed, or a crash in a suite host.
+  if (( $(date +%s) - STARTED > 90 )) && grep -q "Game server connected" "$LOG" 2>/dev/null \
+     && ! grep -q "testkit: world ready" "$LOG" 2>/dev/null; then
+    echo "the server is running but the testkit plugin never started — is ValheimTestKit.dll deployed?" >&2
+    grep -a "ValheimTestKit\|Chainloader" "$LOG" | tail -10 >&2
+    exit 1
+  fi
+
   if [[ -f "$REPORT" ]]; then
     # Only trust a report that parses; the plugin writes through a temp file, so this should not race.
     if python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$REPORT" 2>/dev/null; then
