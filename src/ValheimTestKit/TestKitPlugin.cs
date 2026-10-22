@@ -6,6 +6,7 @@ using System.IO;
 using System.Reflection;
 using System.Text;
 using BepInEx;
+using UnityEngine;
 
 namespace ValheimTestKit
 {
@@ -26,16 +27,36 @@ namespace ValheimTestKit
 
         private readonly List<SuiteResult> _results = new List<SuiteResult>();
         private bool _started;
+        private bool _timedOut;
+        private float _awakeAt;
+
+        private void Awake()
+        {
+            _awakeAt = Time.realtimeSinceStartup;
+        }
 
         private void Update()
         {
-            if (_started || !IsWorldReady())
+            if (_started)
             {
                 return;
             }
 
-            _started = true;
-            StartCoroutine(RunAll());
+            if (IsWorldReady())
+            {
+                _started = true;
+                StartCoroutine(RunAll());
+                return;
+            }
+
+            if (!_timedOut && Time.realtimeSinceStartup - _awakeAt > WorldReadyTimeoutSeconds)
+            {
+                _timedOut = true;
+                Logger.LogError("testkit: no world became ready within " + WorldReadyTimeoutSeconds +
+                                "s; writing a failing report instead of hanging");
+                _results.Add(SuiteResult.Aborted("world-ready", "no world became ready within " + WorldReadyTimeoutSeconds + "s"));
+                WriteReport();
+            }
         }
 
         private static bool IsWorldReady()
@@ -55,6 +76,7 @@ namespace ValheimTestKit
             yield return null;
 
             List<TestSuite> suites = DiscoverSuites();
+            Logger.LogInfo("testkit: stable hash source: " + (RpcSynth.UsesHashFallback ? "fallback copy" : "game assembly"));
             Logger.LogInfo("testkit: " + suites.Count + " suite(s) found: " +
                            string.Join(", ", suites.ConvertAll(s => s.Name).ToArray()));
 
@@ -79,16 +101,17 @@ namespace ValheimTestKit
                 Logger.LogInfo("testkit: running suite " + suite.Name);
                 yield return null;
                 IEnumerator run = null;
+                string abortReason = null;
                 try
                 {
                     run = suite.Run();
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogError("testkit: suite " + suite.Name + " threw before it started: " + ex);
+                    abortReason = ex.GetType().Name + ": " + ex.Message;
                 }
 
-                while (run != null)
+                while (run != null && abortReason == null)
                 {
                     bool moved;
                     try
@@ -97,7 +120,7 @@ namespace ValheimTestKit
                     }
                     catch (Exception ex)
                     {
-                        Logger.LogError("testkit: suite " + suite.Name + " aborted: " + ex);
+                        abortReason = ex.GetType().Name + ": " + ex.Message;
                         break;
                     }
 
@@ -109,7 +132,16 @@ namespace ValheimTestKit
                     yield return run.Current;
                 }
 
-                _results.Add(new SuiteResult(suite));
+                if (abortReason != null)
+                {
+                    // An aborted suite is a failure, never a silent green.
+                    Logger.LogError("testkit: suite " + suite.Name + " aborted: " + abortReason);
+                    _results.Add(SuiteResult.Aborted(suite.Name, abortReason));
+                }
+                else
+                {
+                    _results.Add(new SuiteResult(suite));
+                }
                 yield return null;
             }
 
@@ -166,7 +198,19 @@ namespace ValheimTestKit
             }
 
             found.Sort((x, y) => string.CompareOrdinal(x.Name, y.Name));
-            return found;
+
+            // Two suites with the same identity would make the same scenarios run twice.
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var unique = new List<TestSuite>(found.Count);
+            for (int i = 0; i < found.Count; i++)
+            {
+                if (seen.Add(found[i].GetType().FullName + "|" + found[i].Name))
+                {
+                    unique.Add(found[i]);
+                }
+            }
+
+            return unique;
         }
 
         private void WriteReport()
@@ -196,6 +240,7 @@ namespace ValheimTestKit
             }
 
             suitesJson.Append(']');
+            json.Append("  \"suitesFound\": ").Append(_results.Count).Append(",\n");
             json.Append("  \"passed\": ").Append(passed).Append(",\n");
             json.Append("  \"failed\": ").Append(failed).Append(",\n");
             json.Append("  \"skipped\": ").Append(skipped).Append(",\n");
@@ -204,7 +249,14 @@ namespace ValheimTestKit
             string dir = Path.Combine(Paths.ConfigPath, "valheim-testkit");
             Directory.CreateDirectory(dir);
             string path = Path.Combine(dir, "report.json");
-            File.WriteAllText(path, json.ToString());
+            string temp = path + ".tmp";
+            File.WriteAllText(temp, json.ToString());
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+
+            File.Move(temp, path);
 
             Logger.LogInfo("testkit: " + passed + " passed, " + failed + " failed, " + skipped + " skipped -> " + path);
             if (failed == 0)
@@ -244,7 +296,7 @@ namespace ValheimTestKit
 
     internal sealed class SuiteResult
     {
-        private readonly string _name;
+        private string _name;
         private readonly List<string> _passed;
         private readonly List<string> _failed;
         private readonly List<string> _skipped;
@@ -267,6 +319,23 @@ namespace ValheimTestKit
             _skipped = new List<string>();
             _details = new List<string>();
             SkipReason = skippedReason;
+        }
+
+        private SuiteResult()
+        {
+            _passed = new List<string>();
+            _failed = new List<string>();
+            _skipped = new List<string>();
+            _details = new List<string>();
+        }
+
+        /// <summary>A suite that never produced a verdict (crash, timeout) — reported as one failure.</summary>
+        public static SuiteResult Aborted(string name, string reason)
+        {
+            var result = new SuiteResult();
+            result._name = name;
+            result._failed.Add("suite-aborted: " + reason);
+            return result;
         }
 
         public string Name => _name;

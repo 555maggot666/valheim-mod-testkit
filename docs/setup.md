@@ -27,6 +27,10 @@ Then `scripts/run-suite.sh` handles the rest: it copies your plugin directory in
 
 ## Client (needs one game license — yours)
 
+> **Unverified as of this commit.** The server path is proven end to end; the client run below has not been
+> executed yet because it needs an interactive Steam login. Expect to fix details (launch flags, lavapipe ICD) on
+> the first real run.
+
 Only needed for client-side behaviour (popups, hud, "does the plugin load in the client build"). Use a
 real Steam login; do **not** copy a game between accounts.
 

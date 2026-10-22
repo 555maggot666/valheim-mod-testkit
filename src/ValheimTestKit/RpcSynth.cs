@@ -9,21 +9,23 @@ namespace ValheimTestKit
     /// <summary>
     /// Synthetic peer: delivers a routed RPC into the game's own handler without a second Steam account.
     ///
-    /// Two directions are covered:
-    /// <list type="bullet">
-    /// <item><see cref="Send"/> goes through the real send path (<c>ZRoutedRpc.InvokeRoutedRPC</c>).</item>
-    /// <item><see cref="Deliver"/> calls the handler registered under a name directly, with a sender id of your
-    /// choice — that is exactly what a remote peer's packet would trigger after deserialization.</item>
-    /// </list>
+    /// <para><see cref="Send"/> uses the real send path (<c>ZRoutedRpc.InvokeRoutedRPC</c>).</para>
+    /// <para><see cref="Deliver"/> mirrors the real receive path: it looks the method up in the game's registry
+    /// and calls <c>RoutedMethodBase.Invoke(long, ZPackage)</c>, the same entry point
+    /// <c>ZRoutedRpc.HandleRoutedRPC</c> uses. Typed registrations (<c>RoutedMethod&lt;bool&gt;</c>,
+    /// <c>RoutedMethod&lt;Vector3&gt;</c>, …) deserialize their argument inside that method, so calling it is
+    /// what a real peer's packet does. Calling a stored delegate directly would only work for
+    /// <c>RoutedMethod&lt;ZPackage&gt;</c>.</para>
     /// </summary>
     public static class RpcSynth
     {
-        private static MethodInfo _stableHash;
         private static FieldInfo _functions;
+        private static MethodInfo _stableHash;
         private static bool _resolved;
+        private static bool _hashFallback;
 
-        /// <summary>Sends a package through the normal routed path (Everybody = all peers, or one peer id).</summary>
-        public static void Send(string rpcName, ZPackage package, long target = 0L)
+        /// <summary>Sends a payload through the normal routed path (Everybody = all peers, or one peer id).</summary>
+        public static void Send(string rpcName, ZPackage payload, long target = 0L)
         {
             ZRoutedRpc rpc = ZRoutedRpc.instance;
             if (rpc == null)
@@ -31,14 +33,16 @@ namespace ValheimTestKit
                 throw new InvalidOperationException("ZRoutedRpc.instance is null (not connected)");
             }
 
-            rpc.InvokeRoutedRPC(target, rpcName, package);
+            rpc.InvokeRoutedRPC(target, rpcName, payload);
         }
 
         /// <summary>
-        /// Delivers a package to the handler registered as <paramref name="rpcName"/>, as if it had arrived from
-        /// <paramref name="sender"/>. Returns false when no handler is registered under that name.
+        /// Delivers <paramref name="payload"/> to the handler registered as <paramref name="rpcName"/>, as if it
+        /// had arrived from <paramref name="sender"/>. The payload may sit anywhere inside its package: it is
+        /// wrapped the way the network layer wraps it, so the handler always sees a fresh package at position 0.
+        /// Returns false when no handler is registered under that name.
         /// </summary>
-        public static bool Deliver(string rpcName, ZPackage package, long sender)
+        public static bool Deliver(string rpcName, ZPackage payload, long sender)
         {
             ZRoutedRpc rpc = ZRoutedRpc.instance;
             if (rpc == null)
@@ -46,29 +50,34 @@ namespace ValheimTestKit
                 throw new InvalidOperationException("ZRoutedRpc.instance is null (not connected)");
             }
 
-            Resolve();
-            if (_functions == null)
+            if (payload == null)
             {
-                throw new InvalidOperationException("ZRoutedRpc.m_functions not found; the game may have changed");
+                throw new ArgumentNullException(nameof(payload));
             }
 
-            var registry = (IDictionary)_functions.GetValue(rpc);
-            int hash = StableHash(rpcName);
-            if (!registry.Contains(hash))
+            object routedMethod = FindMethod(rpc, rpcName);
+            if (routedMethod == null)
             {
                 return false;
             }
 
-            object routedMethod = registry[hash];
-            Delegate handler = FindHandlerDelegate(routedMethod);
-            if (handler == null)
+            // What HandleRoutedRPC ends up with: a package holding exactly one nested package, at position 0.
+            // RoutedMethodBase.Invoke reads that nested package and deserializes the typed argument from it.
+            var wire = new ZPackage();
+            wire.Write(payload);
+            wire.SetPos(0);
+
+            MethodInfo invoke = FindInvoke(routedMethod.GetType());
+            if (invoke == null)
             {
-                throw new InvalidOperationException("no delegate found on the routed method for " + rpcName);
+                throw new InvalidOperationException(
+                    "RoutedMethodBase.Invoke(long, ZPackage) not found on " + routedMethod.GetType().FullName +
+                    "; the game's RPC layer changed");
             }
 
             try
             {
-                handler.DynamicInvoke(sender, package);
+                invoke.Invoke(routedMethod, new object[] { sender, wire });
             }
             catch (TargetInvocationException ex) when (ex.InnerException != null)
             {
@@ -78,7 +87,14 @@ namespace ValheimTestKit
             return true;
         }
 
-        /// <summary>The game's own string hash, resolved from assembly_valheim so it cannot drift.</summary>
+        /// <summary>True when a handler is registered under <paramref name="rpcName"/>.</summary>
+        public static bool IsRegistered(string rpcName)
+        {
+            ZRoutedRpc rpc = ZRoutedRpc.instance;
+            return rpc != null && FindMethod(rpc, rpcName) != null;
+        }
+
+        /// <summary>The game's own string hash, resolved from the assembly that actually defines it.</summary>
         public static int StableHash(string text)
         {
             Resolve();
@@ -87,7 +103,150 @@ namespace ValheimTestKit
                 return (int)_stableHash.Invoke(null, new object[] { text });
             }
 
-            // Fallback: the well known Unity "stable hash" variant used by Valheim.
+            _hashFallback = true;
+            return FallbackHash(text);
+        }
+
+        /// <summary>True when <see cref="StableHash"/> had to use its own copy of the algorithm.</summary>
+        public static bool UsesHashFallback
+        {
+            get
+            {
+                Resolve();
+                return _hashFallback || _stableHash == null;
+            }
+        }
+
+        /// <summary>Builds a package from raw bytes, positioned at the start.</summary>
+        public static ZPackage FromBytes(byte[] bytes)
+        {
+            var package = new ZPackage(bytes);
+            package.SetPos(0);
+            return package;
+        }
+
+        /// <summary>Rewinds a package so it can be read again. Not needed before <see cref="Deliver"/>.</summary>
+        public static ZPackage Rewind(ZPackage package)
+        {
+            package.SetPos(0);
+            return package;
+        }
+
+        /// <summary>Dumps a package as base64 so a scenario can persist or compare it.</summary>
+        public static string ToBase64(ZPackage package)
+        {
+            return Convert.ToBase64String(package.GetArray());
+        }
+
+        public static string Describe(ZPackage package)
+        {
+            var sb = new StringBuilder();
+            sb.Append("size=").Append(package.Size()).Append(" pos=").Append(package.GetPos());
+            return sb.ToString();
+        }
+
+        // ---------------------------------------------------------------- internals
+
+        private static object FindMethod(ZRoutedRpc rpc, string rpcName)
+        {
+            Resolve();
+            if (_functions == null)
+            {
+                throw new InvalidOperationException("ZRoutedRpc.m_functions not found; the game may have changed");
+            }
+
+            var registry = (IDictionary)_functions.GetValue(rpc);
+            int hash = StableHash(rpcName);
+            return registry.Contains(hash) ? registry[hash] : null;
+        }
+
+        private static MethodInfo FindInvoke(Type type)
+        {
+            for (Type t = type; t != null; t = t.BaseType)
+            {
+                MethodInfo method = t.GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null, new[] { typeof(long), typeof(ZPackage) }, null);
+                if (method != null)
+                {
+                    return method;
+                }
+            }
+
+            return null;
+        }
+
+        private static void Resolve()
+        {
+            if (_resolved)
+            {
+                return;
+            }
+
+            _resolved = true;
+            _functions = typeof(ZRoutedRpc).GetField("m_functions", BindingFlags.Instance | BindingFlags.NonPublic);
+            _stableHash = FindStableHash();
+        }
+
+        /// <summary>GetStableHashCode is an extension method on StringExtensionMethods in assembly_utils.</summary>
+        private static MethodInfo FindStableHash()
+        {
+            var assemblies = new List<Assembly>();
+
+            Type utils = typeof(ZRoutedRpc).Assembly.GetType("Utils");
+            if (utils != null)
+            {
+                assemblies.Add(utils.Assembly);
+            }
+
+            foreach (Assembly loaded in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (loaded.GetName().Name == "assembly_utils" && !assemblies.Contains(loaded))
+                {
+                    assemblies.Add(loaded);
+                }
+            }
+
+            foreach (Assembly assembly in assemblies)
+            {
+                Type[] types;
+                try
+                {
+                    types = assembly.GetTypes();
+                }
+                catch (ReflectionTypeLoadException ex)
+                {
+                    types = ex.Types;
+                }
+
+                if (types == null)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < types.Length; i++)
+                {
+                    Type type = types[i];
+                    if (type == null)
+                    {
+                        continue;
+                    }
+
+                    MethodInfo method = type.GetMethod("GetStableHashCode",
+                        BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
+                        null, new[] { typeof(string) }, null);
+                    if (method != null && method.ReturnType == typeof(int))
+                    {
+                        return method;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static int FallbackHash(string text)
+        {
+            // Same algorithm as the game's StringExtensionMethods.GetStableHashCode (djb2 with a second stream).
             unchecked
             {
                 int hash1 = 5381;
@@ -105,70 +264,6 @@ namespace ValheimTestKit
 
                 return hash1 + (hash2 * 1566083941);
             }
-        }
-
-        private static void Resolve()
-        {
-            if (_resolved)
-            {
-                return;
-            }
-
-            _resolved = true;
-            Type rpcType = typeof(ZRoutedRpc);
-            _functions = rpcType.GetField("m_functions", BindingFlags.Instance | BindingFlags.NonPublic);
-
-            Type utils = rpcType.Assembly.GetType("Utils");
-            if (utils != null)
-            {
-                _stableHash = utils.GetMethod("GetStableHashCode", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
-                    null, new[] { typeof(string) }, null);
-            }
-        }
-
-        private static Delegate FindHandlerDelegate(object routedMethod)
-        {
-            for (Type t = routedMethod.GetType(); t != null; t = t.BaseType)
-            {
-                FieldInfo[] fields = t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                for (int i = 0; i < fields.Length; i++)
-                {
-                    if (typeof(Delegate).IsAssignableFrom(fields[i].FieldType))
-                    {
-                        return fields[i].GetValue(routedMethod) as Delegate;
-                    }
-                }
-            }
-
-            return null;
-        }
-
-        /// <summary>Builds a package from raw bytes, positioned at the start.</summary>
-        public static ZPackage FromBytes(byte[] bytes)
-        {
-            var package = new ZPackage(bytes);
-            package.SetPos(0);
-            return package;
-        }
-
-        /// <summary>Rewinds a package so it can be decoded again (encoding leaves it at the end).</summary>
-        public static ZPackage Rewind(ZPackage package)
-        {
-            package.SetPos(0);
-            return package;
-        }
-
-        /// <summary>Dumps a package as base64 so a scenario can persist or compare it.</summary>
-        public static string ToBase64(ZPackage package)
-        {
-            return Convert.ToBase64String(package.GetArray());
-        }
-
-        public static string Describe(ZPackage package)
-        {
-            StringBuilder sb = new StringBuilder();
-            sb.Append("size=").Append(package.Size()).Append(" pos=").Append(package.GetPos());
-            return sb.ToString();
         }
     }
 }

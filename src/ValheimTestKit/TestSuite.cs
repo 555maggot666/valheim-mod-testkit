@@ -91,7 +91,8 @@ namespace ValheimTestKit
 
                 if (!moved)
                 {
-                    if (!_failed.Contains(name))
+                    // A scenario that reported itself as skipped must not also count as passed.
+                    if (!_failed.Contains(name) && !_skipped.Contains(name))
                     {
                         Pass(name);
                     }
